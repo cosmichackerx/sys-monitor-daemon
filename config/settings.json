@@ -1,8 +1,7 @@
 {
-  "cpu_threshold": 85.0,
-  "mem_threshold": 85.0,
-  "disk_threshold": 90.0,
-  "interval_sec": 15,
-  "http_port": 9100,
-  "webhook_url": ""
+  "interval_sec": 10,
+  "cpu_threshold_pct": 85.0,
+  "mem_threshold_pct": 90.0,
+  "disk_threshold_pct": 95.0,
+  "log_file": "sys_monitor.log"
 }
