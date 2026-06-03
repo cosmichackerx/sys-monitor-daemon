@@ -1,37 +1,47 @@
 import unittest
 import os
 import json
-from src.monitor import SystemMonitor
+from src.monitor import SystemMonitorDaemon
 
-class TestSystemMonitor(unittest.TestCase):
+class TestSystemMonitorDaemon(unittest.TestCase):
     def setUp(self):
-        self.config_path = "test_config.json"
-        config_data = {
-            "cpu_threshold_percent": 80.0,
-            "memory_threshold_percent": 80.0,
-            "disk_threshold_percent": 80.0,
-            "interval_seconds": 1,
-            "log_file": "test_monitor.log"
+        self.config_path = "config/settings_test.json"
+        self.test_config = {
+            "interval_sec": 1,
+            "cpu_threshold_pct": 80.0,
+            "mem_threshold_pct": 80.0,
+            "disk_threshold_pct": 80.0,
+            "log_file": "sys_monitor_test.log"
         }
+        os.makedirs("config", exist_ok=True)
         with open(self.config_path, "w") as f:
-            json.dump(config_data, f)
-        self.monitor = SystemMonitor(self.config_path)
+            json.dump(self.test_config, f)
+        self.daemon = SystemMonitorDaemon(config_path=self.config_path)
 
     def tearDown(self):
         if os.path.exists(self.config_path):
             os.remove(self.config_path)
-        if os.path.exists("test_monitor.log"):
-            os.remove("test_monitor.log")
+        if os.path.exists("sys_monitor_test.log"):
+            os.remove("sys_monitor_test.log")
 
-    def test_config_loading(self):
-        self.assertEqual(self.monitor.cpu_threshold, 80.0)
-        self.assertEqual(self.monitor.interval, 1)
+    def test_load_config(self):
+        self.assertEqual(self.daemon.config["cpu_threshold_pct"], 80.0)
 
-    def test_cpu_calculation(self):
-        first = (100, 200)
-        second = (120, 300)
-        pct = self.monitor.calculate_cpu_percent(first, second)
-        self.assertAlmostEqual(pct, 80.0)
+    def test_calculate_cpu_pct(self):
+        prev = (100, 1000)
+        curr = (150, 1200)
+        usage = self.daemon.calculate_cpu_pct(prev, curr)
+        self.assertAlmostEqual(usage, 75.0)
 
-if __name__ == "__main__":
+    def test_get_disk_usage(self):
+        pct = self.daemon.get_disk_usage()
+        self.assertTrue(0.0 <= pct <= 100.0)
+
+    def test_run_once(self):
+        status = self.daemon.run_once()
+        self.assertIn("cpu_pct", status)
+        self.assertIn("mem_pct", status)
+        self.assertIn("disk_pct", status)
+
+if __name__ == '__main__':
     unittest.main()
