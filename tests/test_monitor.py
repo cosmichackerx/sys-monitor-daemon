@@ -1,40 +1,40 @@
 import unittest
-import os
-import json
-from src.daemon import SystemMonitorDaemon
+from unittest.mock import patch, mock_open
+from src.daemon import SystemMonitor
 
 class TestSystemMonitor(unittest.TestCase):
     def setUp(self):
-        self.config_path = "/tmp/test_config.json"
-        self.test_config = {
-            "interval": 1,
-            "log_file": "/tmp/test_sys_monitor.log",
-            "state_file": "/tmp/test_sys_monitor_state.json",
-            "thresholds": {
-                "cpu_percent": 50.0,
-                "memory_percent": 50.0,
-                "disk_percent": 50.0
-            }
-        }
-        with open(self.config_path, 'w') as f:
-            json.dump(self.test_config, f)
-        self.daemon = SystemMonitorDaemon(self.config_path)
+        self.config_data = '{"interval_seconds": 1, "thresholds": {"cpu_percent": 80.0, "memory_percent": 85.0, "disk_percent": 90.0}, "webhook_url": "http://localhost/test"}'
 
-    def tearDown(self):
-        for path in [self.config_path, "/tmp/test_sys_monitor.log", "/tmp/test_sys_monitor_state.json"]:
-            if os.path.exists(path):
-                os.remove(path)
+    @patch('builtins.open', new_callable=mock_open)
+    def test_load_config_success(self, mock_file):
+        mock_file.return_value.read.return_value = self.config_data
+        monitor = SystemMonitor('config/monitor_rules.json')
+        self.assertEqual(monitor.config['interval_seconds'], 1)
+        self.assertEqual(monitor.config['thresholds']['cpu_percent'], 80.0)
 
-    def test_load_config(self):
-        self.assertEqual(self.daemon.config["interval"], 1)
-        self.assertEqual(self.daemon.config["thresholds"]["cpu_percent"], 50.0)
+    @patch('builtins.open', new_callable=mock_open, read_data="cpu  100 200 300 400 500")
+    def test_get_cpu_usage(self, mock_file):
+        monitor = SystemMonitor('dummy_path')
+        monitor.config = {"thresholds": {"cpu_percent": 80.0}}
+        first_val = monitor.get_cpu_usage()
+        self.assertEqual(first_val, 0.0)
 
-    def test_collect_metrics(self):
-        metrics = self.daemon.collect_metrics()
-        self.assertIn("cpu_usage_percent", metrics)
-        self.assertIn("memory_usage_percent", metrics)
-        self.assertIn("disk_usage_percent", metrics)
-        self.assertIsInstance(metrics["cpu_usage_percent"], float)
+    @patch('builtins.open', new_callable=mock_open, read_data="MemTotal: 1000 kB\nMemFree: 200 kB\nBuffers: 100 kB\nCached: 200 kB\n")
+    def test_get_memory_usage(self, mock_file):
+        monitor = SystemMonitor('dummy_path')
+        mem_usage = monitor.get_memory_usage()
+        # Used = Total - (Free + Buffers + Cached) = 1000 - (200 + 100 + 200) = 500
+        # Percentage = (500 / 1000) * 100 = 50.0%
+        self.assertEqual(mem_usage, 50.0)
 
-if __name__ == "__main__":
+    @patch('urllib.request.urlopen')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_alert_threshold_breach(self, mock_file, mock_urlopen):
+        mock_file.return_value.read.return_value = self.config_data
+        monitor = SystemMonitor('dummy_path')
+        monitor.send_alert('cpu_percent', 88.5, 80.0)
+        self.assertTrue(mock_urlopen.called)
+
+if __name__ == '__main__':
     unittest.main()
