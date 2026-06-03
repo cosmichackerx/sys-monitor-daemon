@@ -1,8 +1,13 @@
 {
-  "interval": 10,
-  "log_level": "INFO",
-  "alerts": {
-    "cpu_threshold": 90.0,
-    "mem_threshold": 90.0
+  "monitor_interval_seconds": 10,
+  "thresholds": {
+    "cpu_percent": 85.0,
+    "memory_percent": 90.0,
+    "disk_percent": 95.0
+  },
+  "alerting": {
+    "slack_webhook_url": "",
+    "log_to_file": true,
+    "log_path": "/var/log/sys_monitor_daemon.log"
   }
 }
