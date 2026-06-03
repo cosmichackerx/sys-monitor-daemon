@@ -1,58 +1,48 @@
+import pytest
 import os
-import unittest
-import sqlite3
 import json
-import tempfile
-from src.daemon import SystemTelemetryDaemon
+from src.daemon import SystemMonitorDaemon
 
-class TestTelemetryDaemon(unittest.TestCase):
-    def setUp(self):
-        self.test_dir = tempfile.TemporaryDirectory()
-        self.db_path = os.path.join(self.test_dir.name, 'test_telemetry.db')
-        self.config_path = os.path.join(self.test_dir.name, 'config.json')
-        
-        self.config_data = {
-            "db_path": self.db_path,
-            "interval": 1,
-            "max_records": 5,
-            "webhook_url": "",
-            "thresholds": {
-                "cpu": 80.0,
-                "ram": 80.0,
-                "disk": 80.0
-            }
-        }
-        with open(self.config_path, 'w') as f:
-            json.dump(self.config_data, f)
-        
-        self.daemon = SystemTelemetryDaemon(self.config_path)
+@pytest.fixture
+def mock_config(tmp_path):
+    cfg_file = tmp_path / "settings.json"
+    cfg_data = {
+        "interval_seconds": 1,
+        "thresholds": {"cpu_percent": 10.0, "memory_percent": 10.0, "disk_percent": 10.0},
+        "log_file": str(tmp_path / "sys_monitor.log"),
+        "report_path": str(tmp_path / "metrics_report.json")
+    }
+    with open(cfg_file, "w") as f:
+        json.dump(cfg_data, f)
+    return str(cfg_file)
 
-    def tearDown(self):
-        self.test_dir.cleanup()
+def test_config_loader(mock_config):
+    daemon = SystemMonitorDaemon(config_path=mock_config)
+    assert daemon.config["interval_seconds"] == 1
+    assert daemon.config["thresholds"]["cpu_percent"] == 10.0
 
-    def test_database_initialization(self):
-        self.assertTrue(os.path.exists(self.db_path))
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='telemetry';")
-            self.assertIsNotNone(cursor.fetchone())
+def test_metrics_evaluation_and_alerts(mock_config):
+    daemon = SystemMonitorDaemon(config_path=mock_config)
+    metrics = {
+        "cpu_percent": 95.0,
+        "memory_percent": 8.0,
+        "disk_percent": 45.0
+    }
+    alerts = daemon.check_thresholds(metrics)
+    assert len(alerts) == 2
+    assert any("cpu_percent" in a for a in alerts)
+    assert any("disk_percent" in a for a in alerts)
 
-    def test_record_metrics_and_pruning(self):
-        for i in range(10):
-            self.daemon.record_metrics(10.0 + i, 20.0 + i, 30.0 + i)
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM telemetry")
-            count = cursor.fetchone()[0]
-            self.assertEqual(count, 5)
-
-    def test_alert_dispatch_no_url(self):
-        try:
-            self.daemon.dispatch_alert('cpu', 95.0, 80.0)
-            executed = True
-        except Exception:
-            executed = False
-        self.assertTrue(executed)
-
-if __name__ == '__main__':
-    unittest.main()
+def test_write_report(mock_config):
+    daemon = SystemMonitorDaemon(config_path=mock_config)
+    metrics = {
+        "cpu_percent": 50.0,
+        "memory_percent": 50.0,
+        "disk_percent": 50.0,
+        "timestamp": "2026-06-03T12:00:00"
+    }
+    daemon.write_report(metrics)
+    assert os.path.exists(daemon.config["report_path"])
+    with open(daemon.config["report_path"], "r") as f:
+        data = json.load(f)
+    assert data["cpu_percent"] == 50.0
