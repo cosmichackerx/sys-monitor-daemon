@@ -2,126 +2,92 @@ import os
 import sys
 import time
 import json
-import shutil
+import signal
 import logging
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import psutil
+from datetime import datetime
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from alerts import AlertSystem
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("sys-monitor-daemon")
-
-class MetricsHandler(BaseHTTPRequestHandler):
-    daemon_ref = None
-    def do_GET(self):
-        if self.path == "/metrics":
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            metrics_payload = self.daemon_ref.metrics if MetricsHandler.daemon_ref else {}
-            self.wfile.write(json.dumps(metrics_payload).encode("utf-8"))
-        else:
-            self.send_response(404)
-            self.end_headers()
-    def log_message(self, format, *args):
-        return
-
-class MonitorDaemon:
-    def __init__(self, config_path="config/settings.json"):
+class SystemMonitorDaemon:
+    def __init__(self, config_path):
         self.config_path = config_path
+        self.running = True
         self.load_config()
-        self.alerts = AlertSystem(self.config.get("webhook_url", ""))
-        self.running = False
-        self.metrics = {"cpu_load": 0.0, "mem_used_pct": 0.0, "disk_used_pct": 0.0}
-        MetricsHandler.daemon_ref = self
+        self.setup_logging()
 
     def load_config(self):
         try:
-            with open(self.config_path, "r") as f:
+            with open(self.config_path, 'r') as f:
                 self.config = json.load(f)
-        except Exception as e:
-            logger.error(f"Config loading failure: {e}. Defaulting triggers.")
+        except Exception:
             self.config = {
-                "cpu_threshold": 80.0,
-                "mem_threshold": 85.0,
-                "disk_threshold": 90.0,
-                "interval_sec": 10,
-                "http_port": 9100,
-                "webhook_url": ""
+                "interval": 5,
+                "log_file": "/tmp/sys_monitor.log",
+                "state_file": "/tmp/sys_monitor_state.json",
+                "thresholds": {
+                    "cpu_percent": 80.0,
+                    "memory_percent": 85.0,
+                    "disk_percent": 90.0
+                }
             }
 
-    def get_cpu_load(self):
-        if os.path.exists("/proc/loadavg"):
-            try:
-                with open("/proc/loadavg", "r") as f:
-                    load = f.read().split()
-                    return float(load[0]) * 10.0
-            except Exception:
-                pass
-        try:
-            return os.getloadavg()[0] * 100.0 / (os.cpu_count() or 1)
-        except Exception:
-            return 15.0
+    def setup_logging(self):
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s [%(levelname)s] %(message)s',
+            handlers=[
+                logging.FileHandler(self.config.get("log_file", "/tmp/sys_monitor.log")),
+                logging.StreamHandler(sys.stdout)
+            ]
+        )
 
-    def get_memory_usage(self):
-        if os.path.exists("/proc/meminfo"):
-            try:
-                meminfo = {}
-                with open("/proc/meminfo", "r") as f:
-                    for line in f:
-                        parts = line.split()
-                        if len(parts) >= 2:
-                            meminfo[parts[0].replace(":", "")] = int(parts[1])
-                total = meminfo.get("MemTotal", 0)
-                if total > 0:
-                    free = meminfo.get("MemFree", 0) + meminfo.get("Buffers", 0) + meminfo.get("Cached", 0)
-                    used = total - free
-                    return (used / total) * 100.0
-            except Exception:
-                pass
-        return 45.0
+    def handle_signal(self, signum, frame):
+        logging.info(f"Signal {signum} received. Shutting down gracefully...")
+        self.running = False
 
-    def get_disk_usage(self):
-        try:
-            usage = shutil.disk_usage("/")
-            return (usage.used / usage.total) * 100.0
-        except Exception:
-            return 20.0
+    def collect_metrics(self):
+        cpu = psutil.cpu_percent(interval=None)
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage('/')
+        net_io = psutil.net_io_counters()
 
-    def check_thresholds(self):
-        if self.metrics["cpu_load"] > self.config["cpu_threshold"]:
-            self.alerts.trigger("CPU", self.metrics["cpu_load"], self.config["cpu_threshold"])
-        if self.metrics["mem_used_pct"] > self.config["mem_threshold"]:
-            self.alerts.trigger("Memory", self.metrics["mem_used_pct"], self.config["mem_threshold"])
-        if self.metrics["disk_used_pct"] > self.config["disk_threshold"]:
-            self.alerts.trigger("Disk", self.metrics["disk_used_pct"], self.config["disk_threshold"])
+        metrics = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "cpu_usage_percent": cpu,
+            "memory_usage_percent": memory.percent,
+            "disk_usage_percent": disk.percent,
+            "network_bytes_sent": net_io.bytes_sent,
+            "network_bytes_recv": net_io.bytes_recv
+        }
+        return metrics
 
-    def update_metrics(self):
-        try:
-            self.metrics["cpu_load"] = round(self.get_cpu_load(), 2)
-            self.metrics["mem_used_pct"] = round(self.get_memory_usage(), 2)
-            self.metrics["disk_used_pct"] = round(self.get_disk_usage(), 2)
-            logger.info(f"System Diagnostics Updated: {self.metrics}")
-        except Exception as e:
-            logger.error(f"Metric acquisition failure: {e}")
+    def check_thresholds(self, metrics):
+        thresholds = self.config.get("thresholds", {})
+        if metrics["cpu_usage_percent"] > thresholds.get("cpu_percent", 80.0):
+            logging.warning(f"CPU threshold exceeded: {metrics['cpu_usage_percent']}%")
+        if metrics["memory_usage_percent"] > thresholds.get("memory_percent", 85.0):
+            logging.warning(f"Memory threshold exceeded: {metrics['memory_usage_percent']}%")
+        if metrics["disk_usage_percent"] > thresholds.get("disk_percent", 90.0):
+            logging.warning(f"Disk threshold exceeded: {metrics['disk_usage_percent']}%")
 
     def run(self):
-        self.running = True
-        server_address = ("", self.config["http_port"])
-        httpd = HTTPServer(server_address, MetricsHandler)
-        server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-        server_thread.start()
-        logger.info(f"Daemon telemetry engine listening on port {self.config['http_port']}")
-        
-        try:
-            while self.running:
-                self.update_metrics()
-                self.check_thresholds()
-                time.sleep(self.config["interval_sec"])
-        except KeyboardInterrupt:
-            self.running = False
-        finally:
-            httpd.shutdown()
-            logger.info("Telemetry daemon execution terminated safely.")
+        logging.info("Starting sys-monitor-daemon...")
+        signal.signal(signal.SIGTERM, self.handle_signal)
+        signal.signal(signal.SIGINT, self.handle_signal)
+        psutil.cpu_percent(interval=None)
+
+        while self.running:
+            try:
+                metrics = self.collect_metrics()
+                logging.info(f"Collected Metrics: {json.dumps(metrics)}")
+                self.check_thresholds(metrics)
+                state_file = self.config.get("state_file", "/tmp/sys_monitor_state.json")
+                with open(state_file, 'w') as f:
+                    json.dump(metrics, f)
+            except Exception as e:
+                logging.error(f"Error during metrics collection: {str(e)}")
+            time.sleep(self.config.get("interval", 5))
+
+if __name__ == "__main__":
+    config_file = sys.argv[1] if len(sys.argv) > 1 else "config/config.json"
+    daemon = SystemMonitorDaemon(config_file)
+    daemon.run()
