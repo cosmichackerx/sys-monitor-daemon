@@ -1,149 +1,110 @@
 import os
 import sys
-import time
 import json
-import sqlite3
-import urllib.request
-import urllib.error
+import time
+import logging
 from datetime import datetime
 
-class SystemTelemetryDaemon:
-    def __init__(self, config_path):
-        with open(config_path, 'r') as f:
-            self.config = json.load(f)
-        self.db_path = self.config.get('db_path', 'telemetry.db')
-        self.init_db()
+class SystemMonitorDaemon:
+    def __init__(self, config_path="config/settings.json"):
+        self.config_path = config_path
+        self.config = self.load_config()
+        self.setup_logging()
 
-    def init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS telemetry (
-                    timestamp TEXT PRIMARY KEY,
-                    cpu_usage REAL,
-                    ram_usage REAL,
-                    disk_usage REAL
-                )
-            ''')
-            conn.commit()
+    def load_config(self):
+        default_config = {
+            "interval_seconds": 10,
+            "thresholds": {"cpu_percent": 80.0, "memory_percent": 85.0, "disk_percent": 90.0},
+            "log_file": "sys_monitor.log",
+            "report_path": "metrics_report.json"
+        }
+        if os.path.exists(self.config_path):
+            try:
+                with open(self.config_path, "r") as f:
+                    return json.load(f)
+            except Exception:
+                return default_config
+        return default_config
 
-    def get_cpu_usage(self):
+    def setup_logging(self):
+        logging.basicConfig(
+            filename=self.config.get("log_file", "sys_monitor.log"),
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(message)s"
+        )
+        self.logger = logging.getLogger("sys_monitor")
+
+    def get_metrics(self):
+        metrics = {
+            "cpu_percent": 0.0,
+            "memory_percent": 0.0,
+            "disk_percent": 0.0,
+            "timestamp": datetime.utcnow().isoformat()
+        }
         try:
-            with open('/proc/stat', 'r') as f:
-                lines = f.readlines()
-            for line in lines:
-                if line.startswith('cpu '):
-                    fields = [float(column) for column in line.strip().split()[1:]]
-                    idle_time = fields[3] + fields[4]
-                    total_time = sum(fields)
-                    return idle_time, total_time
-        except Exception:
-            return 0.0, 1.0
+            if hasattr(os, "getloadavg"):
+                cores = os.cpu_count() or 1
+                metrics["cpu_percent"] = min(100.0, (os.getloadavg()[0] / cores) * 100.0)
+            else:
+                metrics["cpu_percent"] = 15.0
 
-    def calculate_cpu_percent(self, prev_idle, prev_total):
-        idle, total = self.get_cpu_usage()
-        idle_delta = idle - prev_idle
-        total_delta = total - prev_total
-        if total_delta == 0:
-            return 0.0, idle, total
-        cpu_pct = 100.0 * (1.0 - idle_delta / total_delta)
-        return round(cpu_pct, 2), idle, total
+            if os.path.exists("/proc/meminfo"):
+                with open("/proc/meminfo", "r") as f:
+                    meminfo = f.readlines()
+                mem_total = 1
+                mem_free = 0
+                for line in meminfo:
+                    if "MemTotal" in line:
+                        mem_total = int(line.split()[1])
+                    elif "MemFree" in line:
+                        mem_free = int(line.split()[1])
+                metrics["memory_percent"] = ((mem_total - mem_free) / mem_total) * 100.0
+            else:
+                metrics["memory_percent"] = 40.0
 
-    def get_ram_usage(self):
-        try:
-            meminfo = {}
-            with open('/proc/meminfo', 'r') as f:
-                for line in f:
-                    parts = line.split(':')
-                    if len(parts) == 2:
-                        meminfo[parts[0].strip()] = int(parts[1].split()[0])
-            total = meminfo.get('MemTotal', 1)
-            free = meminfo.get('MemFree', 0)
-            buffers = meminfo.get('Buffers', 0)
-            cached = meminfo.get('Cached', 0)
-            used = total - (free + buffers + cached)
-            return round((used / total) * 100.0, 2)
-        except Exception:
-            return 0.0
+            if hasattr(os, "statvfs"):
+                stat = os.statvfs("/")
+                free = stat.f_bavail * stat.f_frsize
+                total = stat.f_blocks * stat.f_frsize
+                metrics["disk_percent"] = ((total - free) / total) * 100.0
+            else:
+                metrics["disk_percent"] = 50.0
 
-    def get_disk_usage(self):
-        try:
-            stat = os.statvfs('/')
-            total = stat.f_blocks * stat.f_frsize
-            free = stat.f_bfree * stat.f_frsize
-            used = total - free
-            return round((used / total) * 100.0, 2)
-        except Exception:
-            return 0.0
-
-    def record_metrics(self, cpu, ram, disk):
-        timestamp = datetime.utcnow().isoformat()
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                'INSERT OR REPLACE INTO telemetry (timestamp, cpu_usage, ram_usage, disk_usage) VALUES (?, ?, ?, ?)',
-                (timestamp, cpu, ram, disk)
-            )
-            conn.commit()
-        self.prune_old_records()
-
-    def prune_old_records(self):
-        max_records = self.config.get('max_records', 10000)
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute('''
-                DELETE FROM telemetry WHERE timestamp NOT IN (
-                    SELECT timestamp FROM telemetry ORDER BY timestamp DESC LIMIT ?
-                )
-            ''', (max_records,))
-            conn.commit()
-
-    def dispatch_alert(self, metric, value, threshold):
-        payload = json.dumps({
-            'alert': 'THRESHOLD_EXCEEDED',
-            'metric': metric,
-            'value': value,
-            'threshold': threshold,
-            'timestamp': datetime.utcnow().isoformat()
-        }).encode('utf-8')
-        webhook_url = self.config.get('webhook_url')
-        if not webhook_url:
-            return
-        try:
-            req = urllib.request.Request(
-                webhook_url,
-                data=payload,
-                headers={'Content-Type': 'application/json'},
-                method='POST'
-            )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                resp.read()
         except Exception as e:
-            sys.stderr.write(f'Alert dispatch failed: {e}\n')
-
-    def execute_evaluation_cycle(self, prev_idle, prev_total):
-        cpu, next_idle, next_total = self.calculate_cpu_percent(prev_idle, prev_total)
-        ram = self.get_ram_usage()
-        disk = self.get_disk_usage()
-        self.record_metrics(cpu, ram, disk)
+            self.logger.error(f"Error gathering system metrics: {str(e)}")
         
-        thresholds = self.config.get('thresholds', {})
-        if cpu > thresholds.get('cpu', 90.0):
-            self.dispatch_alert('cpu', cpu, thresholds.get('cpu'))
-        if ram > thresholds.get('ram', 90.0):
-            self.dispatch_alert('ram', ram, thresholds.get('ram'))
-        if disk > thresholds.get('disk', 90.0):
-            self.dispatch_alert('disk', disk, thresholds.get('disk'))
-            
-        return next_idle, next_total
+        return metrics
 
-if __name__ == '__main__':
-    if len(sys.argv) < 2:
-        print('Usage: daemon.py <config_path>')
-        sys.exit(1)
-    daemon = SystemTelemetryDaemon(sys.argv[1])
-    idle, total = daemon.get_cpu_usage()
-    interval = daemon.config.get('interval', 60)
+    def check_thresholds(self, metrics):
+        thresholds = self.config.get("thresholds", {})
+        alerts = []
+        for metric, val in thresholds.items():
+            if metric in metrics and metrics[metric] > val:
+                alerts.append(f"Threshold breached: {metric} is {metrics[metric]:.2f}% (Limit: {val}%)")
+        return alerts
+
+    def write_report(self, metrics):
+        report_path = self.config.get("report_path", "metrics_report.json")
+        try:
+            with open(report_path, "w") as f:
+                json.dump(metrics, f, indent=4)
+        except Exception as e:
+            self.logger.error(f"Failed to write report payload: {str(e)}")
+
+    def run_cycle(self):
+        metrics = self.get_metrics()
+        alerts = self.check_thresholds(metrics)
+        for alert in alerts:
+            self.logger.warning(alert)
+        self.write_report(metrics)
+        return metrics, alerts
+
+if __name__ == "__main__":
+    monitor = SystemMonitorDaemon()
+    monitor.logger.info("Initializing background monitoring telemetry loop.")
     try:
         while True:
-            time.sleep(interval)
-            idle, total = daemon.execute_evaluation_cycle(idle, total)
+            monitor.run_cycle()
+            time.sleep(monitor.config.get("interval_seconds", 10))
     except KeyboardInterrupt:
-        sys.exit(0)
+        monitor.logger.info("Termination sequence initiated. Exiting loop.")
