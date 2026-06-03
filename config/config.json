@@ -1,10 +1,8 @@
 {
-  "interval": 5,
-  "log_file": "/tmp/sys_monitor.log",
-  "state_file": "/tmp/sys_monitor_state.json",
+  "interval_seconds": 5,
+  "db_path": "data/metrics.db",
   "thresholds": {
     "cpu_percent": 85.0,
-    "memory_percent": 90.0,
-    "disk_percent": 95.0
+    "memory_percent": 90.0
   }
 }
