@@ -1,5 +1,10 @@
 {
-  "db_path": "data/metrics.db",
-  "interval_seconds": 10,
-  "log_level": "INFO"
+  "interval_seconds": 5,
+  "thresholds": {
+    "cpu_percent": 85.0,
+    "memory_percent": 90.0,
+    "disk_percent": 95.0
+  },
+  "log_file": "sys_monitor.log",
+  "report_path": "metrics_report.json"
 }
