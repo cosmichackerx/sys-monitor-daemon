@@ -7,58 +7,78 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 class SystemMonitor:
-    def __init__(self, config_path='config/config.json'):
-        self.config = self.load_config(config_path)
-        self.interval = self.config.get('interval', 10)
-
-    def load_config(self, path):
-        try:
-            if os.path.exists(path):
-                with open(path, 'r') as f:
-                    return json.load(f)
-        except Exception as e:
-            logging.error(f'Failed to load config: {e}')
-        return {}
+    def __init__(self, interval=10):
+        self.interval = interval
 
     def get_cpu_usage(self):
         try:
-            import psutil
-            return psutil.cpu_percent(interval=1)
-        except ImportError:
-            try:
-                with open('/proc/stat', 'r') as f:
-                    fields = [float(val) for val in f.readline().strip().split()[1:]]
-                idle, total = fields[3], sum(fields)
-                time.sleep(1)
-                with open('/proc/stat', 'r') as f:
-                    fields = [float(val) for val in f.readline().strip().split()[1:]]
-                idle_next, total_next = fields[3], sum(fields)
-                diff_idle = idle_next - idle
-                diff_total = total_next - total
-                return 100.0 * (1.0 - (diff_idle / diff_total)) if diff_total > 0 else 0.0
-            except Exception:
-                return 0.0
+            with open('/proc/stat', 'r') as f:
+                line = f.readline()
+            parts = list(map(int, line.split()[1:5]))
+            idle, total = parts[3], sum(parts)
+            return idle, total
+        except Exception:
+            return None, None
 
     def get_memory_usage(self):
         try:
-            import psutil
-            return psutil.virtual_memory().percent
-        except ImportError:
-            try:
-                with open('/proc/meminfo', 'r') as f:
-                    meminfo = {line.split(':')[0]: int(line.split()[1]) for line in f if len(line.split()) > 1}
-                total = meminfo.get('MemTotal', 1.0)
-                free = meminfo.get('MemFree', 0.0) + meminfo.get('Buffers', 0.0) + meminfo.get('Cached', 0.0)
-                return 100.0 * (1.0 - (free / total))
-            except Exception:
-                return 0.0
+            meminfo = {}
+            with open('/proc/meminfo', 'r') as f:
+                for line in f:
+                    parts = line.split()
+                    meminfo[parts[0].replace(':', '')] = int(parts[1])
+            total = meminfo.get('MemTotal', 1)
+            free = meminfo.get('MemFree', 0) + meminfo.get('Buffers', 0) + meminfo.get('Cached', 0)
+            used = total - free
+            return {
+                'total_mb': total / 1024,
+                'used_mb': used / 1024,
+                'percent': (used / total) * 100
+            }
+        except Exception:
+            return None
+
+    def get_disk_usage(self):
+        try:
+            stat = os.statvfs('/')
+            total = (stat.f_blocks * stat.f_frsize) / (1024 * 1024)
+            free = (stat.f_bavail * stat.f_frsize) / (1024 * 1024)
+            used = total - free
+            return {
+                'total_mb': total,
+                'used_mb': used,
+                'percent': (used / total) * 100
+            }
+        except Exception:
+            return None
+
+    def collect(self):
+        idle1, total1 = self.get_cpu_usage()
+        time.sleep(1)
+        idle2, total2 = self.get_cpu_usage()
+        
+        cpu_percent = 0.0
+        if idle1 is not None and idle2 is not None:
+            diff_idle = idle2 - idle1
+            diff_total = total2 - total1
+            if diff_total > 0:
+                cpu_percent = (1.0 - (diff_idle / diff_total)) * 100
+        
+        mem = self.get_memory_usage()
+        disk = self.get_disk_usage()
+        
+        return {
+            'timestamp': int(time.time()),
+            'cpu_percent': round(cpu_percent, 2),
+            'memory': mem,
+            'disk': disk
+        }
 
     def run(self):
-        logging.info('Daemon initialized. Starting metrics harvesting.')
+        logging.info('Starting sys-monitor-daemon...')
         while True:
-            cpu = self.get_cpu_usage()
-            mem = self.get_memory_usage()
-            logging.info(f'CPU Utilization: {cpu:.2f}% | Memory Utilization: {mem:.2f}%')
+            metrics = self.collect()
+            logging.info(f'System Metrics: {json.dumps(metrics)}')
             time.sleep(self.interval)
 
 if __name__ == '__main__':
