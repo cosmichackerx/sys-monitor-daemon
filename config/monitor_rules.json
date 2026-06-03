@@ -1,0 +1,9 @@
+{
+  "interval_seconds": 5,
+  "thresholds": {
+    "cpu_percent": 80.0,
+    "memory_percent": 85.0,
+    "disk_percent": 90.0
+  },
+  "webhook_url": ""
+}
