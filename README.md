@@ -1,21 +1,19 @@
-# sys-monitor-daemon
+# System Telemetry Monitor Daemon
 
-A lightweight, high-performance modular system monitoring daemon. Tracks CPU, memory, storage utilization, and network traffic interfaces, preserving time-series events inside a localized embedded SQLite persistence layer.
+A zero-dependency, ultra-lightweight Linux telemetry daemon utilizing the `/proc` virtual filesystem and native SQLite persistence to maintain resource usage data with self-pruning cycles. Designed for minimal footprint deployment within strict security profiles.
 
 ## Architecture
 
-- **`src/daemon.py`**: Principal execution engine. Low resource footprint loop, graceful signal-based shutdown (SIGTERM/SIGINT), standard threshold verification alerts.
-- **`config/config.json`**: Controls polling rates, thresholds, and target database parameters.
-- **`tests/test_daemon.py`**: Isolated unit tests employing mock wrappers to validate logic, recovery, and interface structures.
+- **Engine**: Decoupled asynchronous polling loops reading `/proc/stat`, `/proc/meminfo`, and active standard system calls.
+- **Storage**: Local SQL database with automatic execution log rotation.
+- **Alerts**: Simple HTTP request webhook integrations triggered instantly on metric boundary violations.
 
-## Usage
-
-```bash
-python3 src/daemon.py
-```
-
-## Running Tests
+## Setup
 
 ```bash
-python3 -m unittest discover -s tests
+# Run validation tests
+python3 -m unittest tests/test_daemon.py
+
+# Execution command
+python3 src/daemon.py config/sys-monitor.json
 ```
