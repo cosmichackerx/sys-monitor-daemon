@@ -2,143 +2,103 @@ import os
 import sys
 import time
 import json
+import sqlite3
 import signal
-import logging
-import urllib.request
+import psutil
 from datetime import datetime
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
-
-class SystemMonitor:
-    def __init__(self, config_path):
+class SysMonitorDaemon:
+    def __init__(self, config_path="config/config.json"):
         self.config_path = config_path
-        self.config = self.load_config()
         self.running = True
-        self.last_cpu_idle = 0
-        self.last_cpu_total = 0
+        self.load_config()
+        self.init_db()
+        signal.signal(signal.SIGINT, self.handle_exit)
+        signal.signal(signal.SIGTERM, self.handle_exit)
 
     def load_config(self):
         try:
-            with open(self.config_path, 'r') as f:
-                return json.load(f)
-        except Exception as e:
-            logging.error(f"Failed to load config: {e}. Using defaults.")
-            return {
+            with open(self.config_path, "r") as f:
+                self.config = json.load(f)
+        except Exception:
+            self.config = {
                 "interval_seconds": 10,
+                "db_path": "data/metrics.db",
                 "thresholds": {
                     "cpu_percent": 85.0,
-                    "memory_percent": 90.0,
-                    "disk_percent": 95.0
-                },
-                "webhook_url": ""
+                    "memory_percent": 90.0
+                }
             }
+        os.makedirs(os.path.dirname(self.config["db_path"]), exist_ok=True)
 
-    def get_cpu_usage(self):
-        try:
-            with open('/proc/stat', 'r') as f:
-                line = f.readline()
-            parts = line.split()
-            if len(parts) < 5:
-                return 0.0
-            cpu_ticks = [int(x) for x in parts[1:5]]
-            idle = cpu_ticks[3]
-            total = sum(cpu_ticks)
-            
-            diff_idle = idle - self.last_cpu_idle
-            diff_total = total - self.last_cpu_total
-            
-            self.last_cpu_idle = idle
-            self.last_cpu_total = total
-            
-            if diff_total == 0:
-                return 0.0
-            return round((1.0 - (diff_idle / diff_total)) * 100.0, 2)
-        except FileNotFoundError:
-            return 0.0
+    def init_db(self):
+        conn = sqlite3.connect(self.config["db_path"])
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                cpu_usage REAL,
+                memory_usage REAL,
+                disk_usage REAL,
+                net_sent INTEGER,
+                net_recv INTEGER
+            )
+        """)
+        conn.commit()
+        conn.close()
 
-    def get_memory_usage(self):
-        try:
-            meminfo = {}
-            with open('/proc/meminfo', 'r') as f:
-                for line in f:
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        key = parts[0].replace(':', '')
-                        val = int(parts[1])
-                        meminfo[key] = val
-            total = meminfo.get('MemTotal', 1)
-            free = meminfo.get('MemFree', 0)
-            buffers = meminfo.get('Buffers', 0)
-            cached = meminfo.get('Cached', 0)
-            used = total - (free + buffers + cached)
-            return round((used / total) * 100.0, 2)
-        except FileNotFoundError:
-            return 0.0
-
-    def get_disk_usage(self):
-        try:
-            stat = os.statvfs('/')
-            total = stat.f_blocks * stat.f_frsize
-            free = stat.f_bfree * stat.f_frsize
-            used = total - free
-            if total == 0:
-                return 0.0
-            return round((used / total) * 100.0, 2)
-        except Exception:
-            return 0.0
-
-    def send_alert(self, metric, value, threshold):
-        payload = {
-            "timestamp": datetime.utcnow().isoformat() + 'Z',
-            "alert": True,
-            "metric": metric,
-            "value": value,
-            "threshold": threshold,
-            "message": f"Threshold breached: {metric} is {value}% (Limit: {threshold}%)"
-        }
-        logging.warning(payload["message"])
-        url = self.config.get("webhook_url")
-        if not url:
-            return
-        try:
-            data = json.dumps(payload).encode('utf-8')
-            req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
-            with urllib.request.urlopen(req, timeout=5) as response:
-                response.read()
-        except Exception as e:
-            logging.error(f"Failed to deliver webhook alert: {e}")
-
-    def cycle(self):
-        cpu = self.get_cpu_usage()
-        mem = self.get_memory_usage()
-        disk = self.get_disk_usage()
-
-        limits = self.config.get("thresholds", {})
-        
-        logging.info(f"Metrics captured -> CPU: {cpu}%, MEM: {mem}%, DISK: {disk}%")
-
-        if cpu > limits.get("cpu_percent", 85.0):
-            self.send_alert("cpu_percent", cpu, limits.get("cpu_percent"))
-        if mem > limits.get("memory_percent", 90.0):
-            self.send_alert("memory_percent", mem, limits.get("memory_percent"))
-        if disk > limits.get("disk_percent", 95.0):
-            self.send_alert("disk_percent", disk, limits.get("disk_percent"))
-
-    def shutdown(self, signum, frame):
-        logging.info("Termination signal received. Shutting down system daemon.")
+    def handle_exit(self, signum, frame):
         self.running = False
 
-if __name__ == '__main__':
-    config_file = sys.argv[1] if len(sys.argv) > 1 else 'config/monitor_rules.json'
-    monitor = SystemMonitor(config_file)
-    signal.signal(signal.SIGINT, monitor.shutdown)
-    signal.signal(signal.SIGTERM, monitor.shutdown)
-    
-    logging.info("System Monitor Daemon successfully initiated.")
-    while monitor.running:
-        monitor.cycle()
-        time.sleep(monitor.config.get("interval_seconds", 10))
+    def collect_metrics(self):
+        cpu = psutil.cpu_percent(interval=None)
+        mem = psutil.virtual_memory().percent
+        disk = psutil.disk_usage("/").percent
+        net = psutil.net_io_counters()
+        return {
+            "timestamp": datetime.utcnow().isoformat(),
+            "cpu_usage": cpu,
+            "memory_usage": mem,
+            "disk_usage": disk,
+            "net_sent": net.bytes_sent,
+            "net_recv": net.bytes_recv
+        }
+
+    def save_metrics(self, metrics):
+        conn = sqlite3.connect(self.config["db_path"])
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO metrics (timestamp, cpu_usage, memory_usage, disk_usage, net_sent, net_recv)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            metrics["timestamp"],
+            metrics["cpu_usage"],
+            metrics["memory_usage"],
+            metrics["disk_usage"],
+            metrics["net_sent"],
+            metrics["net_recv"]
+        ))
+        conn.commit()
+        conn.close()
+
+    def check_thresholds(self, metrics):
+        if metrics["cpu_usage"] > self.config["thresholds"]["cpu_percent"]:
+            sys.stderr.write(f"[WARN] CPU usage high: {metrics['cpu_usage']}%\n")
+        if metrics["memory_usage"] > self.config["thresholds"]["memory_percent"]:
+            sys.stderr.write(f"[WARN] Memory usage high: {metrics['memory_usage']}%\n")
+
+    def run(self):
+        while self.running:
+            try:
+                metrics = self.collect_metrics()
+                self.save_metrics(metrics)
+                self.check_thresholds(metrics)
+                time.sleep(self.config["interval_seconds"])
+            except Exception as e:
+                sys.stderr.write(f"[ERROR] Daemon loop error: {str(e)}\n")
+                time.sleep(1)
+
+if __name__ == "__main__":
+    daemon = SysMonitorDaemon()
+    daemon.run()
