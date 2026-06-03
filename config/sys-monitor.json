@@ -1,0 +1,11 @@
+{
+  "db_path": "/var/log/sys_telemetry.db",
+  "interval": 10,
+  "max_records": 5000,
+  "webhook_url": "",
+  "thresholds": {
+    "cpu": 85.0,
+    "ram": 90.0,
+    "disk": 95.0
+  }
+}
