@@ -1,48 +1,40 @@
 import unittest
-import json
 import os
-from unittest.mock import patch, MagicMock
+import json
+from src.daemon import SystemMonitorDaemon
 
-# Mock environment prior to relative/absolute imports
-class TestSysMonitorDaemon(unittest.TestCase):
+class TestSystemMonitor(unittest.TestCase):
     def setUp(self):
+        self.config_path = "/tmp/test_config.json"
         self.test_config = {
-            "monitor_interval_seconds": 1,
+            "interval": 1,
+            "log_file": "/tmp/test_sys_monitor.log",
+            "state_file": "/tmp/test_sys_monitor_state.json",
             "thresholds": {
                 "cpu_percent": 50.0,
                 "memory_percent": 50.0,
                 "disk_percent": 50.0
-            },
-            "alerting": {
-                "slack_webhook_url": "",
-                "log_to_file": False,
-                "log_path": ""
             }
         }
+        with open(self.config_path, 'w') as f:
+            json.dump(self.test_config, f)
+        self.daemon = SystemMonitorDaemon(self.config_path)
 
-    def test_config_loading(self):
-        """Verify configuration parsing rules and default thresholds"""
-        self.assertEqual(self.test_config["monitor_interval_seconds"], 1)
-        self.assertIn("thresholds", self.test_config)
-        self.assertIn("cpu_percent", self.test_config["thresholds"])
+    def tearDown(self):
+        for path in [self.config_path, "/tmp/test_sys_monitor.log", "/tmp/test_sys_monitor_state.json"]:
+            if os.path.exists(path):
+                os.remove(path)
 
-    @patch('psutil.cpu_percent')
-    def test_cpu_threshold_exceeded(self, mock_cpu):
-        """Test threshold alerting logic when CPU exceeds limits"""
-        mock_cpu.return_value = 75.0
-        current_cpu = mock_cpu()
-        threshold = self.test_config["thresholds"]["cpu_percent"]
-        self.assertTrue(current_cpu > threshold)
+    def test_load_config(self):
+        self.assertEqual(self.daemon.config["interval"], 1)
+        self.assertEqual(self.daemon.config["thresholds"]["cpu_percent"], 50.0)
 
-    @patch('psutil.virtual_memory')
-    def test_memory_threshold_nominal(self, mock_mem):
-        """Test memory utilization within acceptable margins"""
-        mock_val = MagicMock()
-        mock_val.percent = 30.0
-        mock_mem.return_value = mock_val
-        current_mem = mock_mem().percent
-        threshold = self.test_config["thresholds"]["memory_percent"]
-        self.assertFalse(current_mem > threshold)
+    def test_collect_metrics(self):
+        metrics = self.daemon.collect_metrics()
+        self.assertIn("cpu_usage_percent", metrics)
+        self.assertIn("memory_usage_percent", metrics)
+        self.assertIn("disk_usage_percent", metrics)
+        self.assertIsInstance(metrics["cpu_usage_percent"], float)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()
