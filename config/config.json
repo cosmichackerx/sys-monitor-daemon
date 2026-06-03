@@ -1,0 +1,7 @@
+{
+  "cpu_threshold_percent": 85.0,
+  "memory_threshold_percent": 85.0,
+  "disk_threshold_percent": 90.0,
+  "interval_seconds": 10,
+  "log_file": "sys_monitor.log"
+}
